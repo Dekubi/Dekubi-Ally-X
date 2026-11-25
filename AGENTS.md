@@ -9,9 +9,22 @@ Dekubi-Ally-X: Xbox Series X|S compatibility layer for Windows. Title x86-64
 code runs natively; we supply the console platform and translate GPU work to
 D3D12 / DXIL. See `README.md`.
 
-State (2026-11-25): pre-code. Only `LICENSE` (GPL-3.0), `.gitignore`
-(Rust/Cargo) and docs exist. Do not invent build or test commands; when the
-Cargo workspace lands, record the real ones here.
+State (2026-11-25): workspace skeleton only (`crates/ally-core`,
+`apps/dekubi-ally`). Layout: `.claude/ARCHITECTURE_MAP.md`.
+
+## Build and test
+
+Windows 10/11 x64, toolchain pinned in `rust-toolchain.toml`.
+
+```powershell
+cargo build --workspace
+cargo test --workspace --locked
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+CI (`.github/workflows/ci.yml`) runs the same plus an asset-policy check that
+fails on tracked game data, binaries or archives.
 
 ## Hard rules
 

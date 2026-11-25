@@ -1,0 +1,4 @@
+# Text-only repository: no game data, binaries or archives.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

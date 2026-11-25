@@ -8,8 +8,14 @@
 | `AGENTS.md` | Rules for any agent |
 | `docs/INDEX.md`, `docs/learnings/` | Topic docs, load on demand |
 | `README.md` | Project description, credits |
+| `Cargo.toml` | Workspace: `crates/*`, `apps/*` |
+| `crates/ally-core/` | Shared types and helpers (lib) |
+| `apps/dekubi-ally/` | Command-line front end (bin) |
+| `.github/workflows/ci.yml` | Asset policy, fmt, clippy, tests |
+| `.github/` | PR/issue templates, dependabot |
 
-No source tree yet. Planned: Cargo workspace (`.gitignore` is Rust).
+New subsystems go in `crates/ally-<name>/` (loader, hle, gpu, shader,
+formats, ...), mirroring VIctory's split.
 
 ## Reference clones (owner's PC)
 

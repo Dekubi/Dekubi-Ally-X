@@ -2,7 +2,16 @@
 
 ## Build / test
 
-None yet. Record real `cargo` commands here when the workspace lands.
+```powershell
+cargo build --workspace                 # debug
+cargo build --release -p dekubi-ally    # release
+cargo test --workspace --locked
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+Toolchain pinned in `rust-toolchain.toml` (1.98.1, msvc). CI runs fmt,
+clippy, tests on `windows-latest` plus an asset-policy check.
 
 ## Helpers (owner's PC)
 

@@ -11,10 +11,11 @@ Direct3D 12 / DXIL.
 
 ## Status (2026-11-25)
 
-Pre-code. The repository holds the license, `.gitignore` (Rust/Cargo) and
-these docs. No crates, build scripts or tests exist yet.
+Skeleton. A Cargo workspace with one library (`crates/ally-core`) and one
+binary (`apps/dekubi-ally`) that prints its version. No compatibility code
+yet.
 
-## Planned requirements
+## Requirements
 
 - Windows 10/11 x64, CPU with AVX2
 - Direct3D 12 GPU with shader model 6.6 (mesh shaders for 3D worlds)
@@ -23,8 +24,22 @@ these docs. No crates, build scripts or tests exist yet.
 
 ## Build
 
-Nothing to build yet. Once the Cargo workspace lands, build and test commands
-go here and in `AGENTS.md`.
+```powershell
+cargo build --release -p dekubi-ally
+cargo test --workspace
+```
+
+The first `cargo` command fetches the toolchain pinned in
+`rust-toolchain.toml`. Install Rust with `winget install --id Rustlang.Rustup -e`.
+
+## Layout
+
+| Path | What |
+|------|------|
+| `crates/` | Libraries (`ally-core`, later loader, runtime, GPU, shaders) |
+| `apps/dekubi-ally/` | Command-line front end |
+| `docs/` | Topic docs (`docs/INDEX.md`) |
+| `.github/` | CI, templates |
 
 ## Game files
 

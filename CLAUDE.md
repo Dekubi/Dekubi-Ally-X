@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 Dekubi-Ally-X: Xbox Series X|S compatibility layer for Windows. Rust, GPL-3.0.
-Pre-code (2026-11-25): no crates, build or tests yet. Never invent commands.
+Skeleton only (2026-11-25): `ally-core` lib + `dekubi-ally` bin. Commands in
+`.claude/QUICK_START.md`. Never invent others.
 
 ## Session start
 
