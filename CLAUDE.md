@@ -28,7 +28,7 @@ package. No big code blocks yourself; few-line fixes OK. Max 3 Gemini,
 - Do only what was asked. Minimal edits.
 - Report real build/test output.
 - Versions never `N.0` / `N.0.0`.
-- Each release: update What's New + release notes; credit Fritchii, Lichii.
+- Each release: update What's New + release notes.
 - Commit only when asked; commit before a WSL build.
 - Re-ask the owner before widening data sharing.
 - Owner wants terse replies ending in a list of changed files.

@@ -37,7 +37,6 @@ fails on tracked game data, binaries or archives.
 - Windows-only target. On Linux/macOS say "not built / not tested".
 - Version strings: never `N.0` or `N.0.0` (breaks the updater).
 - Every release: update What's New and the release notes.
-- Credit Fritchii and Lichii for features in release notes / What's New.
 - Re-ask the owner before any change that widens data sharing.
 
 ## More, on demand
