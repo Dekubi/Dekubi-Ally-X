@@ -52,6 +52,10 @@ its code, unless its authors relicense the specific code.
 
 Feature credits: Fritchii, Lichii.
 
+Agent doc layout (`CLAUDE.md`, `.claude/`, `docs/INDEX.md`, `.claudeignore`)
+adapted from [claude-token-optimizer](https://github.com/nadimtuhin/claude-token-optimizer)
+by Nadim Tuhin (MIT).
+
 Not affiliated with or endorsed by Microsoft or any game developer or
 publisher.
 

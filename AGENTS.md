@@ -1,7 +1,7 @@
 # Instructions for AI agents
 
 For any coding agent (Claude Code, Gemini, Codex, Copilot, Cursor, local
-models) working in this repository. Claude-specific notes are in `CLAUDE.md`.
+models) working in this repository. Claude Code starts from `CLAUDE.md`.
 
 ## Project
 
@@ -27,80 +27,13 @@ Cargo workspace lands, record the real ones here.
 - Credit Fritchii and Lichii for features in release notes / What's New.
 - Re-ask the owner before any change that widens data sharing.
 
-## Reusing reference code
+## More, on demand
 
-Owner has permission from the authors to reuse code from:
-Marvisak/VIctory, fxceless/victory-fork, uiliannn/VItoriaBr, Zettrox/ztrx
-(all GPL-3.0-or-later) and xcl-dev/xcl (GPL-2.0-only).
+Read only when the task needs it. Index: `docs/INDEX.md`.
 
-- Keep each file's copyright headers and license notices.
-- Credit the source in the commit body and in `README.md` Credits.
-- XCL is GPL-2.0-only: incompatible with GPL-3.0. Use as reference;
-  reimplement, do not paste, unless its authors relicense that code.
-- Owner keeps local clones next to this repo in
-  `C:\Users\User\Dekubi Box Project\` (`VIctory`, `victory-fork`,
-  `VItoriaBr`, `xcl`, `ztrx`).
-
-## Team workflow (owner's Windows PC)
-
-Roles:
-
-| Agent | Role | Never |
-|-------|------|-------|
-| Gemini (`agy` CLI) | Read-only diagnosis, bug hunting, log reading, review after fixes | Run shell commands, edit files |
-| Ollama `qwen2.5-coder:7b` | Drafts code, patches, release notes | Final say; drafts are unverified |
-| Claude | Plans, verifies helper claims against code, applies minimal edits, builds, tests, packages | Write large code blocks itself (few-line fixes OK) |
-
-Limits: max 3 Gemini, 3 Ollama, 3 Claude helpers at once.
-
-Pipeline:
-
-1. Plan
-2. Gemini diagnoses
-3. Ollama drafts (one file per draft, parallel)
-4. Claude verifies and applies
-5. Compile
-6. Gemini reviews
-7. Fix
-8. Build + test
-9. Package
-10. Short summary listing changed files
-
-### Gemini
-
-- Binary: `C:\Users\User\AppData\Local\agy\bin\agy.exe`
-- Launcher: `C:\Users\User\claude_notes\launch_gemini.ps1`
-- Always `--mode plan`. Prompt via stdin redirect. Report to a file in
-  `C:\Users\User\claude_notes`.
-- Every prompt includes: "Do NOT run shell commands and do NOT edit files."
-- Never `--dangerously-skip-permissions`.
-- agy-fast plugin: allow only `batch_search`, `read_slices`, `quick_outline`.
-
-### Ollama
-
-- Model `qwen2.5-coder:7b` at `localhost:11434`.
-- `python C:\Users\User\claude_notes\ollama_draft.py <task.txt> [ctx...] --out <ans.md>`
-- Prompts under 45K chars.
-- Drafts are buggy and invent sections in release notes. Verify every line.
-
-### Habits
-
-- Commit before a WSL build.
-- `MSYS_NO_PATHCONV=1` when calling WSL from Git Bash.
-- Long builds in the background.
-- Keep the notes overlay in `C:\Users\User\claude_notes` current.
-
-## Performance vocabulary
-
-Terms the owner uses. Use them precisely.
-
-- **GPU:** overdraw, GPU instancing, static/dynamic batching, texture
-  atlasing, mipmaps, backface culling, occlusion culling, baked lighting,
-  dynamic resolution / upscaling, Nanite (virtualized geometry).
-- **CPU / memory:** spatial partitioning, data-oriented design, data
-  locality, SIMD, loop unrolling, inlining, custom allocators,
-  allocation-free design, amortization, dirty flag, memoization,
-  bit-twiddling.
-- **Profiling:** hotspot, bottleneck, CPU-bound, GPU-bound, memory-bound,
-  self time, frame pacing, I/O bottleneck, VRAM, asset streaming, frame
-  rate cap.
+- `docs/learnings/team-workflow.md`: Gemini/Ollama/Claude roles, pipeline,
+  commands, limits.
+- `docs/learnings/reference-repos.md`: reusing VIctory/victory-fork/
+  VItoriaBr/ztrx code, XCL license limit.
+- `docs/learnings/perf-glossary.md`: owner's performance terms.
+- `.claude/COMMON_MISTAKES.md`: top mistakes; read before any change.
