@@ -1,0 +1,40 @@
+# Layout and ignore list adapted from claude-token-optimizer
+# (github.com/nadimtuhin/claude-token-optimizer, MIT, (c) 2025 Nadim Tuhin).
+# Claude Code does not read this file by itself; its read-guard hook enforces it.
+
+# Finished tasks, old sessions, archived docs: read only when asked
+.claude/completions/**
+.claude/sessions/**
+docs/archive/**
+
+# User-facing docs (CLAUDE.md covers sessions)
+README.md
+AGENTS.md
+LICENSE
+
+# Git
+.git/**
+
+# Rust build output
+target/**
+debug/**
+**/*.rs.bk
+*.pdb
+**/mutants.out*/**
+rustc-ice-*.txt
+
+# Game data, dumps, caches (must never be in the repo anyway)
+*.rpf
+*.xvd
+*.ttpf
+*.exe
+*.dll
+*.zip
+
+# Environment
+.env
+.env.*
+
+# Logs
+*.log
+logs/**
