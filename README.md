@@ -65,8 +65,6 @@ XCL is GPL-2.0-only, which cannot be combined with GPL-3.0 code. Use it as a
 behavioural reference; reimplement ideas in this codebase rather than copying
 its code, unless its authors relicense the specific code.
 
-Feature credits: Fritchii, Lichii.
-
 Agent doc layout (`CLAUDE.md`, `.claude/`, `docs/INDEX.md`, `.claudeignore`)
 adapted from [claude-token-optimizer](https://github.com/nadimtuhin/claude-token-optimizer)
 by Nadim Tuhin (MIT).
