@@ -1,4 +1,4 @@
-# Dekubi-Ally-X
+# Dekubi X
 
 Xbox Series X|S compatibility layer for Windows.
 
@@ -9,11 +9,15 @@ runs in our process, Dekubi-Ally-X provides the console platform underneath it
 and translates the console GPU work (D3D12.X, RDNA2 shaders) to host
 Direct3D 12 / DXIL.
 
-## Status (2026-11-25)
+## Status (2026-11-25, v0.1.1)
 
-Skeleton. A Cargo workspace with one library (`crates/ally-core`) and one
-binary (`apps/dekubi-ally`) that prints its version. No compatibility code
-yet.
+Private build. Code base is victory-fork 9376fd6 (VIctory + world-rendering
+fork), renamed to `ally-*` crates. Builds and lints clean for
+`x86_64-pc-windows-msvc`. Not yet run against the test title (Phase 1).
+Current goals: `Dekubi X.exe notes` or `NOTES.toml`.
+
+Contains GPL-2.0-only code ported from XCL (`crates/ally-loader/src/console_insn*.rs`,
+marked `XCL-derived`). Remove or rewrite it before any distribution.
 
 ## Requirements
 
@@ -25,8 +29,18 @@ yet.
 ## Build
 
 ```powershell
-cargo build --release -p dekubi-ally
-cargo test --workspace
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1     # target\release\Dekubi X.exe
+cargo test --workspace --locked
+```
+
+Cargo does not allow a space in a binary name: the binary is `dekubi-x.exe`
+and `scripts\build.ps1` copies it to `Dekubi X.exe`.
+
+## Run
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\play.ps1 -Game "<game folder>\<game exe>"
+& "target\release\Dekubi X.exe" notes
 ```
 
 The first `cargo` command fetches the toolchain pinned in
@@ -61,7 +75,9 @@ gave permission to reuse their code; each project's license still applies.
 | [ztrx](https://github.com/Zettrox/ztrx) | Zettrox | GPL-3.0-or-later | VIctory-based, NVIDIA-focused |
 | [XCL](https://github.com/xcl-dev/xcl) | xcl-dev / ivall and contributors | GPL-2.0-only | Reference only, see below |
 
-XCL is GPL-2.0-only, which cannot be combined with GPL-3.0 code. Use it as a
+XCL is GPL-2.0-only, which cannot be combined with GPL-3.0 code. This private
+build carries one XCL-derived file pair (`ally-loader/src/console_insn*.rs`, via
+victory-fork), marked in its header; remove it before any distribution. Use it as a
 behavioural reference; reimplement ideas in this codebase rather than copying
 its code, unless its authors relicense the specific code.
 

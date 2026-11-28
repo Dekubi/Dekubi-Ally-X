@@ -9,8 +9,8 @@ Dekubi-Ally-X: Xbox Series X|S compatibility layer for Windows. Title x86-64
 code runs natively; we supply the console platform and translate GPU work to
 D3D12 / DXIL. See `README.md`.
 
-State (2026-11-25): workspace skeleton only (`crates/ally-core`,
-`apps/dekubi-ally`). Layout: `.claude/ARCHITECTURE_MAP.md`.
+State (2026-11-25): victory-fork 9376fd6 ported as `ally-*` crates; bin
+`dekubi-x` copied to `Dekubi X.exe` by `scripts/build.ps1`. Layout: `.claude/ARCHITECTURE_MAP.md`.
 
 ## Build and test
 
@@ -36,7 +36,8 @@ fails on tracked game data, binaries or archives.
 - Report real build/test output. Never claim "should pass".
 - Windows-only target. On Linux/macOS say "not built / not tested".
 - Version strings: never `N.0` or `N.0.0` (breaks the updater).
-- Every release: update What's New and the release notes.
+- Every release: update `NOTES.toml` (current goals), `WHATS_NEW.md` and
+  `docs/release-notes/<version>.md`.
 - Re-ask the owner before any change that widens data sharing.
 
 ## More, on demand

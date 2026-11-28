@@ -1,14 +1,56 @@
 [package]
 name = "dekubi-ally"
-description = "Dekubi-Ally-X command-line front end."
+description = "Dekubi X: run Xbox Series X|S titles on Windows."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "dekubi-x"
+path = "src/main.rs"
+
 [dependencies]
 ally-core.workspace = true
+ally-pe.workspace = true
+ally-loader.workspace = true
+ally-hle.workspace = true
+ally-gpu.workspace = true
+ally-shader = { workspace = true, features = ["host"] }
+ally-game.workspace = true
+anyhow.workspace = true
+blake3.workspace = true
+memchr.workspace = true
+clap.workspace = true
+tracing.workspace = true
+walkdir.workspace = true
+
+# Gemini's launcher (double-click start, error dialog, shader warm-up probe).
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi"] }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_Security",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[features]
+# Debug-level logs and the debugging switches (frame capture, stack dumps,
+# the host debug layer, scripted keys). Off in a plain release build.
+diagnostics = [
+    "ally-core/diagnostics",
+    "ally-hle/diagnostics",
+    "ally-loader/diagnostics",
+    "ally-shader/diagnostics",
+]
 
 [lints]
 workspace = true

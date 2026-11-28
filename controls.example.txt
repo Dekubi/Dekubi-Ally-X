@@ -1,0 +1,10 @@
+# Dekubi X game controls. Copy to "controls.txt" next to "Dekubi X.exe".
+# Lines: "key <key> = <button>" (keyboard stand-in pad) or "pad <button> = <button>".
+# Buttons: A B X Y Menu View Up Down Left Right LB RB LS RS
+# Keys: letters, digits, Enter Esc Tab Back Space Shift Ctrl Alt, Up Down Left Right, F1-F12
+# Defaults: Enter=A Back=B Esc=Menu Tab=View X=X Y=Y arrows=D-pad Q=LB E=RB F=LS H=RS
+#           WASD left stick, IJKL right stick, Z/C triggers
+
+# key Space = A
+# pad A = B
+# pad B = A

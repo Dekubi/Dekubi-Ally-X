@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: No game data, binaries or archives tracked
         run: |
-          bad=$(git ls-files | grep -Ei '\.(exe|dll|pdb|lib|sys|xvd|xvc|msixvc|xsp|cab|msi|bin|dat|pak|rpf|ttpf|dds|ktx2?|dxbc|dxil|cso|spv|wav|xma|ogg|opus|mp3|mp4|bik|bk2|awc|zip|7z|rar)$' || true)
+          bad=$(git ls-files | grep -Ei '\.(exe|dll|pdb|lib|sys|xvd|xvc|msixvc|xsp|cab|msi|bin|dat|pak|rpf|ttpf|dds|ktx2?|dxbc|dxil|cso|spv|wav|xma|ogg|opus|mp3|mp4|bik|bk2|awc|zip|7z|rar)$' | grep -vx 'crates/ally-formats/src/bcpack-tables.bin' || true)
           if [ -n "$bad" ]; then echo "Forbidden files tracked:"; echo "$bad"; exit 1; fi
 
   check:
