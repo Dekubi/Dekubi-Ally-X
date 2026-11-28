@@ -43,6 +43,8 @@ rustc-ice-*.txt
 
 # Typical game data
 *.bin
+# The one exception: the BCPack format's constant tables (see victory-fork docs/asset-policy.md).
+!/crates/ally-formats/src/bcpack-tables.bin
 *.dat
 *.pak
 *.rpf

@@ -4,7 +4,8 @@
 
 ```powershell
 cargo build --workspace                 # debug
-cargo build --release -p dekubi-ally    # release
+cargo build --release -p dekubi-ally    # release (dekubi-x.exe)
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1   # + "Dekubi X.exe"
 cargo test --workspace --locked
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -12,6 +13,14 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 Toolchain pinned in `rust-toolchain.toml` (1.98.1, msvc). CI runs fmt,
 clippy, tests on `windows-latest` plus an asset-policy check.
+
+## Run
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\play.ps1 -Game "C:\Users\User\Dekubi Box Project\Dekubi Ally X\game_scarlett_master.exe"
+```
+
+Env vars are `DEKUBI_*` (were `VICTORY_*`). Cache/data: `%LOCALAPPDATA%\DekubiX\`.
 
 ## Helpers (owner's PC)
 

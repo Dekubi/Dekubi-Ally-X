@@ -1,0 +1,1245 @@
+// Adapted from victory-fork (https://github.com/fxceless/victory-fork, commit 9376fd6 + 106 VIctory fixes), a fork of
+// VIctory (https://github.com/Marvisak/VIctory). GPL-3.0-or-later, by Marvisak, fxceless
+// and contributors. Renamed for Dekubi X.
+//! A DXIL vertex, pixel, compute or mesh shader under construction: the module,
+//! the `dx.op` declarations it calls, its signatures and bound resources,
+//! and the metadata and container that wrap it up (SM 6.6, validator 1.6).
+
+use super::bitcode::{Attr, Md, Module, Ty, V};
+use super::container::{self, Binding, Psv, SigElement};
+
+/// Where the shader reads its user data: `b0` in this space.
+pub const USER_DATA_SPACE: u32 = 0;
+/// Where immediate samplers are bound: `s<n>` in this space.
+pub const SAMPLER_SPACE: u32 = 0;
+/// Where root CBVs and SRVs are bound: `b<root parameter index>` and
+/// `t<root parameter index>` in this space.
+pub const ROOT_CBV_SPACE: u32 = 1;
+
+/// The root SRV `t<SLOT_STRIDES>` in [`ROOT_CBV_SPACE`] of a shader that
+/// reads buffers through descriptors it picks from the view heap at an
+/// index it computes (SM 6.6 dynamic resources): a raw buffer of
+/// [`SLOT_STRIDES_COUNT`] dwords the host keeps, dword `i` the bytes per
+/// element of the buffer view at heap slot `i` (0: none or not a buffer).
+/// The console's descriptor holds that stride and its hardware multiplies
+/// the element index by it; the program's code does not say it, and the
+/// used-resource list only names what tables hold. A shader that has this
+/// root SRV also tells the host that the buffer views of the whole heap
+/// must be ready when it runs, not only those its tables name.
+pub const SLOT_STRIDES: u8 = 255;
+/// Dwords of the [`SLOT_STRIDES`] buffer: heap indices are clamped to it.
+pub const SLOT_STRIDES_COUNT: u32 = 1 << 21;
+
+/// Title memory by address (`resource::MEMORY`): console code reads and
+/// writes through raw 40-bit addresses it takes from root constants,
+/// descriptors and other memory (the ray-tracing structure builder and the
+/// programs that walk its structures). The host keeps copies of the title
+/// memory shaders use; a shader with such an access finds the copy by the
+/// address:
+///
+/// - the root SRV `t<SLOT_MEMORY>` in [`ROOT_CBV_SPACE`] is a directory of
+///   [`MEMORY_PAGES`] entries of two dwords, one per 64 KiB of title
+///   address space: the number of the host copy holding that page (0: none
+///   yet) and the page's byte offset in that copy;
+/// - copy `n` is the raw buffer view at view-heap slot `base + n`, `base`
+///   the user-data dword of kind [`USER_MEMORY_BASE`]; slot `base` itself
+///   reads zeros and drops writes;
+/// - the root UAV `u<SLOT_FAULTS>` takes the page numbers of accesses that
+///   found no copy ([`MEMORY_FAULTS`] dwords, dword 0 a sink), which the
+///   host reads afterwards to make those copies for the frames to come.
+pub const SLOT_MEMORY: u8 = 254;
+/// See [`SLOT_MEMORY`].
+pub const SLOT_FAULTS: u8 = 253;
+/// Root SRV slot for the host DXR 1.1 top-level acceleration structure (`t252`,
+/// space 1). Ported from `Linox-IDK/LNX-victory` (`c04e615`, GPL-3.0-or-later).
+pub const SLOT_TLAS: u8 = 252;
+/// Entries of the [`SLOT_MEMORY`] directory: title addresses below 128 GiB.
+pub const MEMORY_PAGES: u32 = 1 << 21;
+/// Dwords of the [`SLOT_FAULTS`] buffer.
+pub const MEMORY_FAULTS: u32 = 4096;
+/// `RootType::Other` code of a user-data dword the host computes: the view
+/// heap slot of the memory copies' views ([`SLOT_MEMORY`]).
+pub const USER_MEMORY_BASE: u32 = 0x100;
+/// `RootType::Other` code of a user-data dword the host computes: the low
+/// 32 bits of the title address of the buffer view at dword `dword` of the
+/// descriptor table of root parameter `slot`; [`USER_VIEW_ADDRESS`] + 1:
+/// its bits from 32 up. (Console code reads the address out of a buffer
+/// descriptor and uses it as a pointer.)
+pub const USER_VIEW_ADDRESS: u32 = 0x101;
+/// `RootType::Other` code of a user-data dword the host computes: the
+/// bytes (0 to 15) by which the raw view the host binds for the root view
+/// of root parameter `slot` begins before the title's address. A raw view
+/// begins on 16 bytes of its host buffer; the console's root views begin
+/// anywhere (the structure builder's counters sit at addresses ending in
+/// 4 and c). The shader adds the dword to every byte offset through that
+/// view. Asked for every root UAV, and for the root SRVs of programs with
+/// a spilled user-data table.
+pub const USER_VIEW_BIAS: u32 = 0x103;
+
+/// `ShaderFlags` bits (metadata) and their `SFI0` feature bits.
+pub(crate) mod flags {
+    pub const RAW_BUFFERS: u64 = 1 << 4;
+    pub const DOUBLES: u64 = 1 << 2;
+    pub const STENCIL_REF: u64 = 1 << 11;
+    pub const TYPED_UAV_LOADS: u64 = 1 << 13;
+    pub const WAVE_OPS: u64 = 1 << 19;
+    pub const BARYCENTRICS: u64 = 1 << 22;
+    pub const INT64: u64 = 1 << 20;
+    pub const ATOMIC_TYPED64: u64 = 1 << 27;
+    pub const ATOMIC_HEAP64: u64 = 1 << 32;
+    pub const RAYTRACING_1_1: u64 = 1 << 25;
+    pub const RESOURCE_HEAP: u64 = 1 << 30;
+    pub const SAMPLER_HEAP: u64 = 1 << 31;
+}
+
+pub(crate) struct Types {
+    pub void: Ty,
+    pub i1: Ty,
+    pub i32: Ty,
+    pub f32: Ty,
+    pub handle: Ty,
+    pub props: Ty,
+    pub bind: Ty,
+    pub cbuf_ret: Ty,
+    pub res_ret: Ty,
+}
+
+/// What a mesh shader declares beyond its thread-group size.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Mesh {
+    pub max_vertices: u32,
+    pub max_primitives: u32,
+    /// 1 lines, 2 triangles.
+    pub topology: u8,
+}
+
+/// What a geometry shader declares: triangles in, triangle strips out on
+/// stream 0, one instance.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Geometry {
+    pub max_vertices: u32,
+}
+
+/// The null slot every host view heap keeps at its end (0: no limit). Shaders translated while
+/// it is set read that slot for any view index at or past it. A read past a heap's end is
+/// undefined: a host that caps its heap (NVIDIA at 1 000 000 views; a retail game's heap is
+/// larger) hung its GPU (GPU-based validation: "descriptor heap index out of bounds"), and AMD
+/// RDNA3 took a page fault and removed the device.
+static VIEW_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// See [`VIEW_LIMIT`]: `null_slot` is the last slot of the host's view heap, kept null.
+pub fn set_view_heap_limit(null_slot: u32) {
+    VIEW_LIMIT.store(null_slot, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// See [`VIEW_LIMIT`]: the null slot shaders translated now clamp view indices to (0: none).
+pub fn view_heap_limit() -> u32 {
+    VIEW_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) struct Shader {
+    pub m: Module,
+    pub t: Types,
+    pub pixel: bool,
+    pub inputs: Vec<SigElement>,
+    pub outputs: Vec<SigElement>,
+    /// A mesh shader's per-primitive outputs.
+    pub prims: Vec<SigElement>,
+    /// A mesh shader (`threads` is its thread-group size).
+    pub mesh: Option<Mesh>,
+    /// A geometry shader (the rectangle stage, `rect.rs`); `pixel` is false.
+    pub geometry: Option<Geometry>,
+    /// Dwords of user data the shader reads (0: no user-data buffer).
+    pub user_data: u32,
+    /// Immediate samplers, bound as `s0..` in [`SAMPLER_SPACE`].
+    pub samplers: u32,
+    /// Bit n: immediate sampler n is a comparison sampler.
+    pub cmp_samplers: u64,
+    /// Root CBVs read, by root parameter index, with their handles.
+    pub root_cbvs: Vec<(u8, V)>,
+    /// Root SRVs (raw buffers) read, likewise.
+    pub root_srvs: Vec<(u8, V)>,
+    /// Root UAVs (raw buffers) read or written, likewise.
+    pub root_uavs: Vec<(u8, V)>,
+    pub flags: u64,
+    /// Heap handles made with a non-uniform index.
+    pub nonuniform_handles: u32,
+    /// A compute shader with this thread-group size.
+    pub threads: Option<[u32; 3]>,
+    /// The wave size a compute shader requires (`WaveSize`).
+    pub wave_size: Option<u32>,
+    /// Thread-group shared memory, in dwords.
+    pub lds_dwords: u32,
+    lds: Option<V>,
+    main: V,
+    pub entry: usize,
+}
+
+impl Shader {
+    pub fn new(pixel: bool) -> Self {
+        let mut m = Module::default();
+        let void = m.void();
+        let i1 = m.int(1);
+        let i8 = m.int(8);
+        let i32 = m.int(32);
+        let f32 = m.float();
+        let i8p = m.ptr(i8);
+        let handle = m.named_struct("dx.types.Handle", vec![i8p]);
+        let props = m.named_struct("dx.types.ResourceProperties", vec![i32, i32]);
+        let bind = m.named_struct("dx.types.ResBind", vec![i32, i32, i32, i8]);
+        let cbuf_ret = m.named_struct("dx.types.CBufRet.i32", vec![i32, i32, i32, i32]);
+        let res_ret = m.named_struct("dx.types.ResRet.f32", vec![f32, f32, f32, f32, i32]);
+        let main_ty = m.func_ty(void, vec![]);
+        m.ptr(main_ty);
+        let main = m.function("main", main_ty, None, true);
+        let entry = m.new_block();
+        Shader {
+            m,
+            t: Types {
+                void,
+                i1,
+                i32,
+                f32,
+                handle,
+                props,
+                bind,
+                cbuf_ret,
+                res_ret,
+            },
+            pixel,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            prims: Vec::new(),
+            mesh: None,
+            geometry: None,
+            user_data: 0,
+            samplers: 0,
+            cmp_samplers: 0,
+            root_cbvs: Vec::new(),
+            root_srvs: Vec::new(),
+            root_uavs: Vec::new(),
+            flags: 0,
+            nonuniform_handles: 0,
+            threads: None,
+            wave_size: None,
+            lds_dwords: 0,
+            lds: None,
+            main,
+            entry,
+        }
+    }
+
+    /// The thread-group shared memory: `[lds_dwords x i32]` in address
+    /// space 3.
+    pub fn lds(&mut self) -> V {
+        if let Some(g) = self.lds {
+            return g;
+        }
+        let arr = self.m.array(self.lds_dwords, self.t.i32);
+        let g = self.m.global("lds", arr, 3);
+        self.lds = Some(g);
+        g
+    }
+
+    /// Calls `dx.op.<name>` (class and overload) with `opcode` and `args`.
+    pub fn op(
+        &mut self,
+        block: usize,
+        name: &str,
+        attr: Attr,
+        ret: Ty,
+        opcode: u32,
+        args: &[V],
+    ) -> V {
+        let mut params = vec![self.t.i32];
+        params.extend(args.iter().map(|&a| self.m.type_of(a)));
+        let fty = self.m.func_ty(ret, params);
+        self.m.ptr(fty);
+        let f = self
+            .m
+            .function(&format!("dx.op.{name}"), fty, Some(attr), false);
+        let mut all = vec![self.m.i32(opcode)];
+        all.extend(args);
+        self.m.call(block, f, all)
+    }
+
+    /// The handle of the user-data constant buffer, made in the entry block.
+    pub fn user_data_handle(&mut self) -> V {
+        let bind = [
+            self.m.i32(0),
+            self.m.i32(0),
+            self.m.i32(USER_DATA_SPACE),
+            self.m.i8(2), // CBV
+        ];
+        let bind = self.m.aggregate(self.t.bind, &bind);
+        let block = self.entry;
+        let (i, f) = (self.m.i32(0), self.m.bool(false));
+        let h = self.op(
+            block,
+            "createHandleFromBinding",
+            Attr::ReadNone,
+            self.t.handle,
+            217,
+            &[bind, i, f],
+        );
+        // The size is known in `finish`, which fixes this placeholder.
+        self.annotate(block, h, 13, u32::MAX)
+    }
+
+    /// The handle of the root CBV of root parameter `slot`, made in the
+    /// entry block.
+    pub fn root_cbv_handle(&mut self, slot: u8) -> V {
+        if let Some(&(_, h)) = self.root_cbvs.iter().find(|r| r.0 == slot) {
+            return h;
+        }
+        let r = self.m.i32(u32::from(slot));
+        let bind = [r, r, self.m.i32(ROOT_CBV_SPACE), self.m.i8(2)];
+        let bind = self.m.aggregate(self.t.bind, &bind);
+        let f = self.m.bool(false);
+        let block = self.entry;
+        let h = self.op(
+            block,
+            "createHandleFromBinding",
+            Attr::ReadNone,
+            self.t.handle,
+            217,
+            &[bind, r, f],
+        );
+        let h = self.annotate(block, h, 13, 65536);
+        self.root_cbvs.push((slot, h));
+        h
+    }
+
+    /// The handle of the root SRV (a raw buffer) of root parameter `slot`.
+    pub fn root_srv_handle(&mut self, slot: u8) -> V {
+        if let Some(&(_, h)) = self.root_srvs.iter().find(|r| r.0 == slot) {
+            return h;
+        }
+        let r = self.m.i32(u32::from(slot));
+        let bind = [r, r, self.m.i32(ROOT_CBV_SPACE), self.m.i8(0)];
+        let bind = self.m.aggregate(self.t.bind, &bind);
+        let f = self.m.bool(false);
+        let block = self.entry;
+        let h = self.op(
+            block,
+            "createHandleFromBinding",
+            Attr::ReadNone,
+            self.t.handle,
+            217,
+            &[bind, r, f],
+        );
+        let h = self.annotate(block, h, 11, 0);
+        self.flags |= flags::RAW_BUFFERS;
+        self.root_srvs.push((slot, h));
+        h
+    }
+
+    /// The handle of the host DXR 1.1 ray-tracing acceleration structure ([`SLOT_TLAS`]).
+    #[allow(dead_code)]
+    pub fn tlas_handle(&mut self) -> V {
+        if let Some(&(_, h)) = self.root_srvs.iter().find(|r| r.0 == SLOT_TLAS) {
+            return h;
+        }
+        let r = self.m.i32(u32::from(SLOT_TLAS));
+        let bind = [r, r, self.m.i32(ROOT_CBV_SPACE), self.m.i8(0)];
+        let bind = self.m.aggregate(self.t.bind, &bind);
+        let f = self.m.bool(false);
+        let block = self.entry;
+        let h = self.op(
+            block,
+            "createHandleFromBinding",
+            Attr::ReadNone,
+            self.t.handle,
+            217,
+            &[bind, r, f],
+        );
+        // Resource kind 16: RTAccelerationStructure.
+        let h = self.annotate(block, h, 16, 0);
+        self.flags |= flags::RAYTRACING_1_1;
+        self.root_srvs.push((SLOT_TLAS, h));
+        h
+    }
+
+    /// `AllocateRayQuery` (DXIL op 178) with constant ray `flags`: returns the ray-query handle.
+    #[allow(dead_code)]
+    pub fn ray_query(&mut self, block: usize, flags: u32) -> V {
+        let f = self.m.i32(flags);
+        self.op(
+            block,
+            "allocateRayQuery",
+            Attr::NoUnwind,
+            self.t.i32,
+            178,
+            &[f],
+        )
+    }
+
+    /// `RayQuery_TraceRayInline` (DXIL op 179): starts `rq` against [`SLOT_TLAS`].
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
+    pub fn trace_ray_inline(
+        &mut self,
+        block: usize,
+        rq: V,
+        flags: V,
+        mask: V,
+        origin: [V; 3],
+        tmin: V,
+        dir: [V; 3],
+        tmax: V,
+    ) {
+        let h = self.tlas_handle();
+        let args = [
+            rq, h, flags, mask, origin[0], origin[1], origin[2], tmin, dir[0], dir[1], dir[2], tmax,
+        ];
+        let void = self.t.void;
+        self.op(
+            block,
+            "rayQuery_TraceRayInline",
+            Attr::NoUnwind,
+            void,
+            179,
+            &args,
+        );
+    }
+
+    /// `RayQuery_Proceed` (DXIL op 180): advances traversal; returns `i1` true while candidates remain.
+    #[allow(dead_code)]
+    pub fn ray_query_proceed(&mut self, block: usize, rq: V) -> V {
+        let i1 = self.t.i1;
+        self.op(block, "rayQuery_Proceed.i1", Attr::NoUnwind, i1, 180, &[rq])
+    }
+
+    /// `RayQuery_CommittedStatus` (op 184): 0 nothing, 1 triangle, 2 procedural.
+    #[allow(dead_code)]
+    pub fn ray_query_committed_status(&mut self, block: usize, rq: V) -> V {
+        let i32t = self.t.i32;
+        self.op(
+            block,
+            "rayQuery_StateScalar.i32",
+            Attr::ReadOnly,
+            i32t,
+            184,
+            &[rq],
+        )
+    }
+
+    /// `RayQuery_CommittedInstanceIndex` (op 207).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_instance_index(&mut self, block: usize, rq: V) -> V {
+        let i32t = self.t.i32;
+        self.op(
+            block,
+            "rayQuery_StateScalar.i32",
+            Attr::ReadOnly,
+            i32t,
+            207,
+            &[rq],
+        )
+    }
+
+    /// `RayQuery_CommittedInstanceID` (op 208).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_instance_id(&mut self, block: usize, rq: V) -> V {
+        let i32t = self.t.i32;
+        self.op(
+            block,
+            "rayQuery_StateScalar.i32",
+            Attr::ReadOnly,
+            i32t,
+            208,
+            &[rq],
+        )
+    }
+
+    /// `RayQuery_CommittedGeometryIndex` (op 209).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_geometry_index(&mut self, block: usize, rq: V) -> V {
+        let i32t = self.t.i32;
+        self.op(
+            block,
+            "rayQuery_StateScalar.i32",
+            Attr::ReadOnly,
+            i32t,
+            209,
+            &[rq],
+        )
+    }
+
+    /// `RayQuery_CommittedPrimitiveIndex` (op 210).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_primitive_index(&mut self, block: usize, rq: V) -> V {
+        let i32t = self.t.i32;
+        self.op(
+            block,
+            "rayQuery_StateScalar.i32",
+            Attr::ReadOnly,
+            i32t,
+            210,
+            &[rq],
+        )
+    }
+
+    /// `RayQuery_CommittedInstanceContributionToHitGroupIndex` (op 215).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_instance_contribution(&mut self, block: usize, rq: V) -> V {
+        let i32t = self.t.i32;
+        self.op(
+            block,
+            "rayQuery_StateScalar.i32",
+            Attr::ReadOnly,
+            i32t,
+            215,
+            &[rq],
+        )
+    }
+
+    /// `RayQuery_CommittedRayT` (op 200).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_t(&mut self, block: usize, rq: V) -> V {
+        let f32t = self.t.f32;
+        self.op(
+            block,
+            "rayQuery_StateScalar.f32",
+            Attr::ReadOnly,
+            f32t,
+            200,
+            &[rq],
+        )
+    }
+
+    /// `RayQuery_CommittedTriangleFrontFace` (op 192).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_front_face(&mut self, block: usize, rq: V) -> V {
+        let i1 = self.t.i1;
+        self.op(
+            block,
+            "rayQuery_StateScalar.i1",
+            Attr::ReadOnly,
+            i1,
+            192,
+            &[rq],
+        )
+    }
+
+    /// `RayQuery_CommittedTriangleBarycentrics` (op 194): returns `[u, v]` (`f32`).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_barycentrics(&mut self, block: usize, rq: V) -> [V; 2] {
+        let f32t = self.t.f32;
+        let c0 = self.m.i8(0);
+        let c1 = self.m.i8(1);
+        let u = self.op(
+            block,
+            "rayQuery_StateVector.f32",
+            Attr::ReadOnly,
+            f32t,
+            194,
+            &[rq, c0],
+        );
+        let v = self.op(
+            block,
+            "rayQuery_StateVector.f32",
+            Attr::ReadOnly,
+            f32t,
+            194,
+            &[rq, c1],
+        );
+        [u, v]
+    }
+
+    /// `RayQuery_CommittedObjectToWorld3x4` (op 188): element `(row, col)` (`row` in `0..3`, `col` in `0..4`).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_object_to_world(
+        &mut self,
+        block: usize,
+        rq: V,
+        row: u32,
+        col: u8,
+    ) -> V {
+        let f32t = self.t.f32;
+        let r = self.m.i32(row);
+        let c = self.m.i8(col);
+        self.op(
+            block,
+            "rayQuery_StateMatrix.f32",
+            Attr::ReadOnly,
+            f32t,
+            188,
+            &[rq, r, c],
+        )
+    }
+
+    /// `RayQuery_CommittedWorldToObject3x4` (op 189): element `(row, col)` (`row` in `0..3`, `col` in `0..4`).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_world_to_object(
+        &mut self,
+        block: usize,
+        rq: V,
+        row: u32,
+        col: u8,
+    ) -> V {
+        let f32t = self.t.f32;
+        let r = self.m.i32(row);
+        let c = self.m.i8(col);
+        self.op(
+            block,
+            "rayQuery_StateMatrix.f32",
+            Attr::ReadOnly,
+            f32t,
+            189,
+            &[rq, r, c],
+        )
+    }
+}
+
+/// Emits a minimal `[1, 1, 1]` DXR 1.1 `RayQuery` compute shader that traces
+/// a ray from `(0, 0, 0)` along `(0, 0, 1)` against [`SLOT_TLAS`] (`t252`,
+/// space 1) and writes `[status, t_bits, geom_idx, prim_idx]` to root UAV
+/// `u0` (space 1) at byte offset 0.
+pub fn ray_query_smoke_dxil() -> Vec<u8> {
+    let mut s = Shader::new(false);
+    s.threads = Some([1, 1, 1]);
+    let b = s.entry;
+    let rq = s.ray_query(b, 1 | 4); // FORCE_OPAQUE | ACCEPT_FIRST_HIT_AND_END_SEARCH
+    let flags = s.m.i32(0);
+    let mask = s.m.i32(0xff);
+    let zero = s.m.f32(0.0f32.to_bits());
+    let one = s.m.f32(1.0f32.to_bits());
+    let far = s.m.f32(1000.0f32.to_bits());
+    s.trace_ray_inline(
+        b,
+        rq,
+        flags,
+        mask,
+        [zero, zero, zero],
+        zero,
+        [zero, zero, one],
+        far,
+    );
+    let (lp, done) = (s.m.new_block(), s.m.new_block());
+    s.m.terminate(b, super::bitcode::Term::Br(lp));
+    let more = s.ray_query_proceed(lp, rq);
+    s.m.terminate(lp, super::bitcode::Term::CondBr(more, lp, done));
+
+    let status = s.ray_query_committed_status(done, rq);
+    let t = s.ray_query_committed_t(done, rq);
+    let t_bits = s.m.cast(done, super::bitcode::Cast::Bitcast, t, s.t.i32);
+    let geom = s.ray_query_committed_geometry_index(done, rq);
+    let prim = s.ray_query_committed_primitive_index(done, rq);
+
+    let out = s.root_uav_handle(0);
+    let off = s.m.i32(0);
+    let iu = s.m.undef(s.t.i32);
+    let wmask = s.m.i8(0xf);
+    let align = s.m.i32(4);
+    let void = s.t.void;
+    s.op(
+        done,
+        "rawBufferStore.i32",
+        Attr::NoUnwind,
+        void,
+        140,
+        &[out, off, iu, status, t_bits, geom, prim, wmask, align],
+    );
+    s.m.terminate(done, super::bitcode::Term::Ret);
+    s.finish()
+}
+
+impl Shader {
+    /// The handle of the root UAV (a raw buffer) of root parameter `slot`:
+    /// `u<slot>` in [`ROOT_CBV_SPACE`].
+    pub fn root_uav_handle(&mut self, slot: u8) -> V {
+        if let Some(&(_, h)) = self.root_uavs.iter().find(|r| r.0 == slot) {
+            return h;
+        }
+        let r = self.m.i32(u32::from(slot));
+        let bind = [r, r, self.m.i32(ROOT_CBV_SPACE), self.m.i8(1)];
+        let bind = self.m.aggregate(self.t.bind, &bind);
+        let f = self.m.bool(false);
+        let block = self.entry;
+        let h = self.op(
+            block,
+            "createHandleFromBinding",
+            Attr::ReadNone,
+            self.t.handle,
+            217,
+            &[bind, r, f],
+        );
+        let h = self.annotate(block, h, 11 | 0x1000, 0);
+        self.flags |= flags::RAW_BUFFERS;
+        self.root_uavs.push((slot, h));
+        h
+    }
+
+    /// The handle of immediate sampler `n` (a comparison sampler when its
+    /// bit in `cmp_samplers` is set).
+    pub fn sampler_handle(&mut self, block: usize, n: u32) -> V {
+        let bind = [
+            self.m.i32(n),
+            self.m.i32(n),
+            self.m.i32(SAMPLER_SPACE),
+            self.m.i8(3), // sampler
+        ];
+        let bind = self.m.aggregate(self.t.bind, &bind);
+        let (i, f) = (self.m.i32(n), self.m.bool(false));
+        let h = self.op(
+            block,
+            "createHandleFromBinding",
+            Attr::ReadNone,
+            self.t.handle,
+            217,
+            &[bind, i, f],
+        );
+        let cmp = if self.cmp_samplers >> n & 1 != 0 {
+            0x8000
+        } else {
+            0
+        };
+        self.annotate(block, h, 14 | cmp, 0)
+    }
+
+    pub fn annotate(&mut self, block: usize, h: V, props0: u32, props1: u32) -> V {
+        let p = [self.m.i32(props0), self.m.i32(props1)];
+        let p = self.m.aggregate(self.t.props, &p);
+        self.op(
+            block,
+            "annotateHandle",
+            Attr::ReadNone,
+            self.t.handle,
+            216,
+            &[h, p],
+        )
+    }
+
+    /// A descriptor heap handle, annotated with `props`; `nonuniform` when
+    /// the index may differ between lanes (`NonUniformResourceIndex`).
+    pub fn heap_handle(
+        &mut self,
+        block: usize,
+        index: V,
+        sampler: bool,
+        nonuniform: bool,
+        props: (u32, u32),
+    ) -> V {
+        // a view index past the host heap (`set_view_heap_limit`) reads its null slot instead
+        let limit = VIEW_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+        // (as `dx.op.binary` UMin: a compare and select emitted here made the bitcode invalid)
+        let index = if !sampler && limit != 0 {
+            let null = self.m.i32(limit);
+            let i32t = self.t.i32;
+            let v = self.op(
+                block,
+                "binary.i32",
+                Attr::ReadNone,
+                i32t,
+                40,
+                &[index, null],
+            );
+            self.m.tag(v, super::bitcode::Tag::Clamp);
+            v
+        } else if sampler {
+            // A sampler heap has at most 2,048 samplers on any host: an
+            // index past that (a number read from memory the host has not
+            // got yet) stays inside the largest heap there is.
+            // shortcut: not the bound heap's own count, which a title
+            // heap smaller than 2,048 would need.
+            let last = self.m.i32(2047);
+            let i32t = self.t.i32;
+            let v = self.op(
+                block,
+                "binary.i32",
+                Attr::ReadNone,
+                i32t,
+                40,
+                &[index, last],
+            );
+            self.m.tag(v, super::bitcode::Tag::Clamp);
+            v
+        } else {
+            index
+        };
+        self.flags |= if sampler {
+            flags::SAMPLER_HEAP
+        } else {
+            flags::RESOURCE_HEAP
+        };
+        self.nonuniform_handles += u32::from(nonuniform);
+        let (s, n) = (self.m.bool(sampler), self.m.bool(nonuniform));
+        let h = self.op(
+            block,
+            "createHandleFromHeap",
+            Attr::ReadNone,
+            self.t.handle,
+            218,
+            &[index, s, n],
+        );
+        self.annotate(block, h, props.0, props.1)
+    }
+
+    /// The finished container.
+    pub fn finish(mut self) -> Vec<u8> {
+        let ud_size = (self.user_data * 4).next_multiple_of(16);
+        self.fix_user_data_size(ud_size);
+        // The clean-up, before anything is declared about the code: a
+        // feature whose last use it removed must not be declared (the
+        // validator compares the flags with what the code uses).
+        let passes = super::shader_opt() & super::bitcode::opt::MODULE;
+        if passes != 0 {
+            self.m.optimise(passes);
+            let used = self.m.usage();
+            for (flag, used) in [
+                (flags::WAVE_OPS, used.wave_ops),
+                (flags::INT64, used.int64),
+                (flags::TYPED_UAV_LOADS, used.typed_uav_loads),
+                (flags::RESOURCE_HEAP, used.heap_views),
+                (flags::SAMPLER_HEAP, used.heap_samplers),
+                (flags::ATOMIC_TYPED64 | flags::ATOMIC_HEAP64, used.atomic64),
+            ] {
+                if !used {
+                    self.flags &= !flag;
+                }
+            }
+        }
+        let mut resources = None;
+        let mut bindings = Vec::new();
+        let i32c = |s: &mut Self, v: u32| {
+            let c = s.m.i32(v);
+            s.m.md_value(c)
+        };
+        if self.user_data > 0
+            || self.samplers > 0
+            || !self.root_cbvs.is_empty()
+            || !self.root_srvs.is_empty()
+            || !self.root_uavs.is_empty()
+        {
+            let empty = self.m.md_str("");
+            let mut cbvs = None;
+            let mut cbv_list = Vec::new();
+            if self.user_data > 0 {
+                let arr = self.m.array(self.user_data.next_multiple_of(4), self.t.i32);
+                let ty = self.m.named_struct("UserData", vec![arr]);
+                let p = self.m.ptr(ty);
+                let u = self.m.undef(p);
+                let ops = vec![
+                    Some(i32c(&mut self, 0)),
+                    Some(self.m.md_value(u)),
+                    Some(empty),
+                    Some(i32c(&mut self, USER_DATA_SPACE)),
+                    Some(i32c(&mut self, 0)),
+                    Some(i32c(&mut self, 1)),
+                    Some(i32c(&mut self, ud_size)),
+                    None,
+                ];
+                cbv_list.push(Some(self.m.md_node(ops)));
+                bindings.push(Binding {
+                    kind: 2,
+                    space: USER_DATA_SPACE,
+                    register: 0,
+                    dxil_kind: 13,
+                });
+            }
+            let blob = self.m.array(16384, self.t.i32);
+            let ty = self.m.named_struct("RootCbv", vec![blob]);
+            let p = self.m.ptr(ty);
+            let u = self.m.undef(p);
+            for (slot, _) in self.root_cbvs.clone() {
+                let ops = vec![
+                    Some(i32c(&mut self, cbv_list.len() as u32)),
+                    Some(self.m.md_value(u)),
+                    Some(empty),
+                    Some(i32c(&mut self, ROOT_CBV_SPACE)),
+                    Some(i32c(&mut self, u32::from(slot))),
+                    Some(i32c(&mut self, 1)),
+                    Some(i32c(&mut self, 65536)),
+                    None,
+                ];
+                cbv_list.push(Some(self.m.md_node(ops)));
+                bindings.push(Binding {
+                    kind: 2,
+                    space: ROOT_CBV_SPACE,
+                    register: u32::from(slot),
+                    dxil_kind: 13,
+                });
+            }
+            if !cbv_list.is_empty() {
+                cbvs = Some(self.m.md_node(cbv_list));
+            }
+            let mut srvs = None;
+            if !self.root_srvs.is_empty() {
+                let ty = self
+                    .m
+                    .named_struct("struct.ByteAddressBuffer", vec![self.t.i32]);
+                let p = self.m.ptr(ty);
+                let u = self.m.undef(p);
+                let rtas = self
+                    .m
+                    .named_struct("struct.RaytracingAccelerationStructure", vec![self.t.i32]);
+                let rtas = self.m.ptr(rtas);
+                let rtas = self.m.undef(rtas);
+                let mut list = Vec::new();
+                for (n, (slot, _)) in self.root_srvs.clone().into_iter().enumerate() {
+                    // 16: a ray-tracing structure; 11: a raw buffer.
+                    let (var, shape) = if slot == SLOT_TLAS {
+                        (rtas, 16)
+                    } else {
+                        (u, 11)
+                    };
+                    let ops = vec![
+                        Some(i32c(&mut self, n as u32)),
+                        Some(self.m.md_value(var)),
+                        Some(empty),
+                        Some(i32c(&mut self, ROOT_CBV_SPACE)),
+                        Some(i32c(&mut self, u32::from(slot))),
+                        Some(i32c(&mut self, 1)),
+                        Some(i32c(&mut self, shape)),
+                        Some(i32c(&mut self, 0)),
+                        // A ray-tracing structure: element type (tag 0) u32 (5).
+                        if slot == SLOT_TLAS {
+                            let tag = i32c(&mut self, 0);
+                            let u32k = i32c(&mut self, 5);
+                            Some(self.m.md_node(vec![Some(tag), Some(u32k)]))
+                        } else {
+                            None
+                        },
+                    ];
+                    list.push(Some(self.m.md_node(ops)));
+                    bindings.push(Binding {
+                        kind: 4,
+                        space: ROOT_CBV_SPACE,
+                        register: u32::from(slot),
+                        dxil_kind: shape,
+                    });
+                }
+                srvs = Some(self.m.md_node(list));
+            }
+            let mut uavs = None;
+            if !self.root_uavs.is_empty() {
+                let ty = self
+                    .m
+                    .named_struct("struct.RWByteAddressBuffer", vec![self.t.i32]);
+                let p = self.m.ptr(ty);
+                let u = self.m.undef(p);
+                let no = self.m.bool(false);
+                let no = self.m.md_value(no);
+                let mut list = Vec::new();
+                for (n, (slot, _)) in self.root_uavs.clone().into_iter().enumerate() {
+                    // Id, variable, name, space, lower bound, range size,
+                    // shape (11: raw buffer), globally coherent, counter,
+                    // rasterizer ordered, no extra properties.
+                    let ops = vec![
+                        Some(i32c(&mut self, n as u32)),
+                        Some(self.m.md_value(u)),
+                        Some(empty),
+                        Some(i32c(&mut self, ROOT_CBV_SPACE)),
+                        Some(i32c(&mut self, u32::from(slot))),
+                        Some(i32c(&mut self, 1)),
+                        Some(i32c(&mut self, 11)),
+                        Some(no),
+                        Some(no),
+                        Some(no),
+                        None,
+                    ];
+                    list.push(Some(self.m.md_node(ops)));
+                    bindings.push(Binding {
+                        kind: 7,
+                        space: ROOT_CBV_SPACE,
+                        register: u32::from(slot),
+                        dxil_kind: 11,
+                    });
+                }
+                uavs = Some(self.m.md_node(list));
+            }
+            let mut samplers = None;
+            if self.samplers > 0 {
+                let ty = self.m.named_struct("struct.SamplerState", vec![self.t.i32]);
+                let p = self.m.ptr(ty);
+                let u = self.m.undef(p);
+                let mut list = Vec::new();
+                for n in 0..self.samplers {
+                    let kind = (self.cmp_samplers >> n & 1) as u32;
+                    let ops = vec![
+                        Some(i32c(&mut self, n)),
+                        Some(self.m.md_value(u)),
+                        Some(empty),
+                        Some(i32c(&mut self, SAMPLER_SPACE)),
+                        Some(i32c(&mut self, n)),
+                        Some(i32c(&mut self, 1)),
+                        // Sampler kind: 1 comparison.
+                        Some(i32c(&mut self, kind)),
+                        None,
+                    ];
+                    list.push(Some(self.m.md_node(ops)));
+                    bindings.push(Binding {
+                        kind: 1,
+                        space: SAMPLER_SPACE,
+                        register: n,
+                        dxil_kind: 14,
+                    });
+                }
+                samplers = Some(self.m.md_node(list));
+            }
+            resources = Some(self.m.md_node(vec![srvs, uavs, cbvs, samplers]));
+            // PSV0 lists them as the module does: CBVs, samplers, SRVs, UAVs.
+            bindings.sort_by_key(|b| match b.kind {
+                2 => 0,
+                1 => 1,
+                7 => 3,
+                _ => 2,
+            });
+        }
+        if let Some(r) = resources {
+            self.m.named_md("dx.resources", vec![r]);
+        }
+
+        let graphics = self.threads.is_none() || self.mesh.is_some();
+        if graphics {
+            // shortcut: every output is declared to depend on every input; the
+            // exact sets need a dependence pass. Drivers read this state.
+            let scalars = |els: &[SigElement]| {
+                els.iter()
+                    .filter_map(|e| e.row.map(|r| r * 4 + u32::from(e.col + e.cols)))
+                    .max()
+                    .unwrap_or(0)
+            };
+            let (ni, no) = (scalars(&self.inputs), scalars(&self.outputs));
+            let mut view = vec![ni, no];
+            // Mesh shaders have no inputs: then the primitive outputs' count.
+            if self.mesh.is_some() {
+                view.push(scalars(&self.prims));
+            }
+            for _ in 0..ni {
+                for k in 0..no.div_ceil(32) {
+                    let bits = (no - 32 * k).min(32);
+                    view.push(if bits == 32 {
+                        u32::MAX
+                    } else {
+                        (1 << bits) - 1
+                    });
+                }
+            }
+            // A geometry shader lists four streams: the other three have
+            // no outputs.
+            if self.geometry.is_some() {
+                view.extend([0, 0, 0]);
+            }
+            let arr = self.m.array(view.len() as u32, self.t.i32);
+            let elems: Vec<V> = view.iter().map(|&v| self.m.i32(v)).collect();
+            let arr = self.m.aggregate(arr, &elems);
+            let arr = self.m.md_value(arr);
+            let view_node = self.m.md_node(vec![Some(arr)]);
+            self.m.named_md("dx.viewIdState", vec![view_node]);
+        }
+
+        let sigs = if graphics {
+            let ins = self.signature_md(self.inputs.clone());
+            let outs = self.signature_md(self.outputs.clone());
+            let prims = self.signature_md(self.prims.clone());
+            Some(self.m.md_node(vec![ins, outs, prims]))
+        } else {
+            None
+        };
+        // A pixel shader with an SV_StencilRef output (as DXC collects it).
+        if self.pixel && self.outputs.iter().any(|o| o.kind == 20) {
+            self.flags |= flags::STENCIL_REF;
+        }
+        // Entry properties: shader flags (tag 0), geometry state (1),
+        // thread-group size (4), wave size (11).
+        let mut props = Vec::new();
+        if self.flags != 0 {
+            props.push(i32c(&mut self, 0));
+            let i64t = self.m.int(64);
+            let f = self.m.int_const(i64t, self.flags as i64);
+            props.push(self.m.md_value(f));
+        }
+        if let Some(g) = self.geometry {
+            // Input primitive (3: triangles), maximum vertices, stream
+            // mask, output topology (5: triangle strips), instances.
+            props.push(i32c(&mut self, 1));
+            let state = [3, g.max_vertices, 1, 5, 1].map(|n| Some(i32c(&mut self, n)));
+            props.push(self.m.md_node(state.to_vec()));
+        }
+        if let Some(threads) = self.threads {
+            let t = threads.map(|n| Some(i32c(&mut self, n)));
+            let t = self.m.md_node(t.to_vec());
+            match self.mesh {
+                // Mesh state (tag 9): threads, maximum vertices and
+                // primitives, topology, payload bytes.
+                Some(mesh) => {
+                    props.push(i32c(&mut self, 9));
+                    let state = [
+                        mesh.max_vertices,
+                        mesh.max_primitives,
+                        mesh.topology.into(),
+                        0,
+                    ]
+                    .map(|n| Some(i32c(&mut self, n)));
+                    let mut node = vec![Some(t)];
+                    node.extend(state);
+                    props.push(self.m.md_node(node));
+                }
+                None => {
+                    props.push(i32c(&mut self, 4));
+                    props.push(t);
+                }
+            }
+        }
+        if let Some(n) = self.wave_size {
+            props.push(i32c(&mut self, 11));
+            let n = Some(i32c(&mut self, n));
+            props.push(self.m.md_node(vec![n]));
+        }
+        let props =
+            (!props.is_empty()).then(|| self.m.md_node(props.into_iter().map(Some).collect()));
+        let main = self.m.md_value(self.main);
+        let name = self.m.md_str("main");
+        let entry = self
+            .m
+            .md_node(vec![Some(main), Some(name), sigs, resources, props]);
+
+        let ident = self.m.md_str("victory");
+        let ident = self.m.md_node(vec![Some(ident)]);
+        self.m.named_md("llvm.ident", vec![ident]);
+        let one = i32c(&mut self, 1);
+        let six = i32c(&mut self, 6);
+        let version = self.m.md_node(vec![Some(one), Some(six)]);
+        self.m.named_md("dx.version", vec![version]);
+        self.m.named_md("dx.valver", vec![version]);
+        // Program kinds: 0 pixel, 1 vertex, 2 geometry, 5 compute, 13 mesh.
+        let (name, kind) = match (self.threads, self.pixel) {
+            _ if self.mesh.is_some() => ("ms", 13u32),
+            _ if self.geometry.is_some() => ("gs", 2),
+            (Some(_), _) => ("cs", 5u32),
+            (None, true) => ("ps", 0),
+            (None, false) => ("vs", 1),
+        };
+        let name = self.m.md_str(name);
+        let sm = self.m.md_node(vec![Some(name), Some(six), Some(six)]);
+        self.m.named_md("dx.shaderModel", vec![sm]);
+        self.m.named_md("dx.entryPoints", vec![entry]);
+
+        let bitcode = self.m.write();
+        super::bitcode::census::note(&self.m, &bitcode);
+        let mut dxil = Vec::with_capacity(24 + bitcode.len());
+        dxil.extend((kind << 16 | 0x66).to_le_bytes());
+        dxil.extend((((24 + bitcode.len()) / 4) as u32).to_le_bytes());
+        dxil.extend(b"DXIL");
+        dxil.extend(0x106u32.to_le_bytes());
+        dxil.extend(16u32.to_le_bytes());
+        dxil.extend((bitcode.len() as u32).to_le_bytes());
+        dxil.extend(&bitcode);
+
+        let mut features = 0u64;
+        if self.flags & flags::DOUBLES != 0 {
+            features |= 0x1;
+        }
+        if self.flags & flags::STENCIL_REF != 0 {
+            features |= 0x200;
+        }
+        if self.flags & flags::TYPED_UAV_LOADS != 0 {
+            features |= 0x800;
+        }
+        if self.flags & flags::WAVE_OPS != 0 {
+            features |= 0x4000;
+        }
+        if self.flags & flags::INT64 != 0 {
+            features |= 0x8000;
+        }
+        if self.flags & flags::BARYCENTRICS != 0 {
+            features |= 0x2_0000;
+        }
+        if self.flags & flags::RESOURCE_HEAP != 0 {
+            features |= 0x200_0000;
+        }
+        if self.flags & flags::SAMPLER_HEAP != 0 {
+            features |= 0x400_0000;
+        }
+        if self.flags & flags::ATOMIC_TYPED64 != 0 {
+            features |= 0x40_0000;
+        }
+        if self.flags & flags::ATOMIC_HEAP64 != 0 {
+            features |= 0x1000_0000;
+        }
+        // D3D_SHADER_FEATURE_RAYTRACING_TIER_1_1.
+        if self.flags & flags::RAYTRACING_1_1 != 0 {
+            features |= 0x10_0000;
+        }
+        let sfi0 = features.to_le_bytes();
+        let isg1 = container::signature(&self.inputs, true);
+        let osg1 = container::signature(&self.outputs, false);
+        let flag = if self.pixel {
+            self.outputs.iter().any(|o| (17..=19).contains(&o.kind))
+        } else {
+            self.outputs.iter().any(|o| o.kind == 3)
+        };
+        let psv0 = container::psv(&Psv {
+            stage: kind as u8,
+            flag: flag && self.threads.is_none(),
+            inputs: &self.inputs,
+            outputs: &self.outputs,
+            prims: &self.prims,
+            mesh: self.mesh.map(|m| (m, self.lds_dwords * 4)),
+            geometry: self.geometry.map(|g| g.max_vertices),
+            bindings: &bindings,
+            threads: self.threads.unwrap_or_default(),
+            wave_size: self.wave_size,
+        });
+        let hash = [0u8; 20];
+        let psg1 = container::signature(&self.prims, false);
+        let mut parts: Vec<(&[u8; 4], &[u8])> =
+            vec![(b"SFI0", &sfi0), (b"ISG1", &isg1), (b"OSG1", &osg1)];
+        if self.mesh.is_some() {
+            parts.push((b"PSG1", &psg1));
+        }
+        parts.extend([(b"PSV0", &psv0[..]), (b"HASH", &hash), (b"DXIL", &dxil)]);
+        container::build(&parts)
+    }
+
+    /// The user-data buffer's annotation carries its size, known only now.
+    fn fix_user_data_size(&mut self, size: u32) {
+        let old = [self.m.i32(13), self.m.i32(u32::MAX)];
+        let old = self.m.aggregate(self.t.props, &old);
+        let new = [self.m.i32(13), self.m.i32(size)];
+        let new = self.m.aggregate(self.t.props, &new);
+        self.m.replace_const(old, new);
+    }
+
+    fn signature_md(&mut self, elements: Vec<SigElement>) -> Option<Md> {
+        if elements.is_empty() {
+            return None;
+        }
+        let mut list = Vec::new();
+        for (id, e) in elements.iter().enumerate() {
+            let c32 = |s: &mut Self, v: u32| {
+                let c = s.m.i32(v);
+                Some(s.m.md_value(c))
+            };
+            let c8 = |s: &mut Self, v: u8| {
+                let c = s.m.i8(v);
+                Some(s.m.md_value(c))
+            };
+            let idx = c32(self, e.index);
+            let indices = Some(self.m.md_node(vec![idx]));
+            let usage = if e.usage != 0 {
+                let (tag, mask) = (c32(self, 3), c32(self, u32::from(e.usage)));
+                Some(self.m.md_node(vec![tag, mask]))
+            } else {
+                None
+            };
+            let ops = vec![
+                c32(self, id as u32),
+                Some(self.m.md_str(&e.name)),
+                c8(self, e.comp),
+                c8(self, e.kind),
+                indices,
+                c8(self, e.interp),
+                c32(self, 1),
+                c8(self, e.cols),
+                c32(self, e.row.unwrap_or(u32::MAX)),
+                c8(self, if e.row.is_some() { e.col } else { u8::MAX }),
+                usage,
+            ];
+            list.push(Some(self.m.md_node(ops)));
+        }
+        Some(self.m.md_node(list))
+    }
+}
